@@ -171,7 +171,15 @@ class Env():
         return self.__concat_state()
 
     def step(self, delta):
-        def reward_func(pnl):
+        def reward_func(raw_pnl):
+            # THE FIX: DYNAMIC NORMALIZATION
+            # AI ko $65000 ka profit/loss dekh kar shock lagta tha. 
+            # Hum initial price (self.S[0]) ko base $1000 se divide karke ek scale banayenge.
+            scale_factor = self.S[0] / 1000.0 if self.S[0] > 0 else 1.0
+            
+            # PnL ko scale down kar diya taaki AI S&P 500 ki tarah soch sake
+            pnl = raw_pnl / scale_factor
+            
             pnl *= 100
             reward = 0.03 + pnl - self.kappa * (abs(pnl)**self.reward_exponent)
             return reward * 10
