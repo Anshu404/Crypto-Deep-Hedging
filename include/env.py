@@ -190,8 +190,14 @@ class Env():
         
         b_delta = self.get_bs_delta()
         
-        t_cost = -abs(-delta - self.stockOwned) * self.S[self.t] * self.transaction_cost
-        b_t_cost =  -abs(-b_delta - self.b_stockOwned) * self.S[self.t] * self.transaction_cost
+        # FLEX 2: DYNAMIC TRANSACTION COSTS (LIQUIDITY CRISIS)
+        # Agar Volatility (self.v) high hai, toh fees 5 se 6 guna tak badh jayegi.
+        volatility_multiplier = 1.0 + (self.v * 5.0) 
+        dynamic_tc = self.transaction_cost * volatility_multiplier
+        
+        t_cost = -abs(-delta - self.stockOwned) * self.S[self.t] * dynamic_tc
+        b_t_cost =  -abs(-b_delta - self.b_stockOwned) * self.S[self.t] * dynamic_tc
+
         
         opt_old_price = self.option['P']
         self.t += 1
