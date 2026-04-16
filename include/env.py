@@ -5,13 +5,14 @@ import pandas as pd
 import include.data_keeper as data_keeper
 import include.simulation as simulation
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from scipy.stats import norm
 from include.settings import getSettings
 
 class Env():
     def __init__(self, s = getSettings()):
-        self.sim = simulation.Simulator(s['process'], periods_in_day = s['D'])
+        sim_type = 'GBM' if s['process'] == 'Crypto' else s['process']
+        self.sim = simulation.Simulator(sim_type, periods_in_day = s['D'])
         
         # Env Params
         self.transaction_cost = s['transaction_cost']
@@ -23,15 +24,23 @@ class Env():
         self.r_df = pd.read_csv('data/1yr_treasury.csv')        
         self.heston_params = pd.read_csv('data/heston_params.csv')
 
+        # NEW CODE: Load and FILTER Bitcoin Data
+        if self.process == 'Crypto':
+            print("LOADING AND FILTERING REAL BITCOIN OPTIONS DATA...")
+            df = pd.read_csv('data/btc_live_options.csv')
+            # Sirf wo options lo jinki expiry kam se kam 7 din door hai (Negative TTM se bachne ke liye)
+            df['days_to_exp'] = (pd.to_datetime(df['expiration']) - pd.to_datetime(df['quote_datetime'])).dt.days
+            self.crypto_data = df[df['days_to_exp'] > 7].copy()
+            if len(self.crypto_data) == 0:
+                self.crypto_data = df # Fallback if all options expire soon
+
         self.D, self.steps = s['D'], s['n_steps']
         if self.process == 'Real':
             self.data_keeper = data_keeper.DataKeeper(self.steps)
         self.data_set = pd.DataFrame()
         self.t, self.v, self.date_idx, = 0, 0.0, 0
         
-        # holds option's properties
         self.option = {}
-        # Spot price time series
         self.S = []
         
     def get_bs_delta(self):
@@ -53,39 +62,76 @@ class Env():
         self.ticker = row['ticker']
         self.option['P'] = P
 
-        try:
-            self.r = self.r_df.loc[self.r_df['Date'] == self.cur_date, '1y'].iloc[0]
-        except:
-            # If r is missing, use previous (shouldn't happen)
-            print("r missing:", self.cur_date)
+        if self.process == 'Crypto':
+            self.r = 0.05
+        else:
+            try:
+                self.r = self.r_df.loc[self.r_df['Date'] == self.cur_date, '1y'].iloc[0]
+            except:
+                self.r = 0.01
         
         ttm = (datetime.strptime(self.expiry, '%Y-%m-%d') - \
             datetime.strptime(self.cur_date, '%Y-%m-%d')).days - (1 - (self.D - self.t%self.D) / self.D)
 
-        self.option['T'] = ttm
+        # SAFETY NET: Time to maturity (T) kabhi 0.001 se kam nahi hoga
+        self.option['T'] = max(ttm, 0.001)
         self.option['S/K'] = spot / self.K
               
-        iv = calc_impl_volatility(spot, self.K, self.r, self.q, ttm/365, P)
-        # Sometimes impossible to solve IV, have to use the previous value
+        iv = calc_impl_volatility(spot, self.K, self.r, self.q, self.option['T']/365, P)
+        
+        # SAFETY NET: Volatility kabhi exactly 0 nahi hogi
         if iv:
             self.v = iv
+        self.v = max(self.v, 0.01)
         
     def reset(self, testing = False, start_a = 0.0, start_b = 0.0):
-        # Reset must be called when episode begins
-        # testing indicates if empirical data should be used
         self.testing = testing
         self.t = 0
         self.S = np.zeros(self.steps + 1)
-        
         self.stockOwned, self.b_stockOwned = start_a, start_b
-        
         new_set = None
         
-        if testing:
+        if testing and self.process == 'Real':
             self.data_set = self.data_keeper.next_test_set()
         else:
             if self.process == 'Real':
                 self.data_set = self.data_keeper.next_train_set()
+                
+            elif self.process == 'Crypto':
+                real_opt = self.crypto_data.sample(1).iloc[0]
+                
+                spot = real_opt['underlying_bid']
+                strike = real_opt['strike']
+                expiry_str = real_opt['expiration']
+                quote_time_str = real_opt['quote_datetime']
+                
+                self.r = 0.05 
+                crypto_vol = 0.60 
+                
+                self.sim.set_properties_gbm(crypto_vol, self.q, 0.0)
+                self.sim.simulate(spot, self.steps + 1, 1/(365*self.D))
+                
+                df = pd.DataFrame()
+                df['underlying_bid'] = self.sim.getS()
+                df['expiration'] = [expiry_str] * (self.steps + 1)
+                df['strike'] = [strike] * (self.steps + 1)
+                
+                base_date = datetime.strptime(quote_time_str, "%Y-%m-%d %H:%M:%S")
+                dates = [base_date + timedelta(hours=i) for i in range(self.steps + 1)]
+                df['quote_datetime'] = [d.strftime("%Y-%m-%d %H:%M:%S") for d in dates]
+                df['ticker'] = ['BTC'] * (self.steps + 1)
+                
+                prices = []
+                for i in range(self.steps + 1):
+                    days_to_exp = (datetime.strptime(expiry_str, "%Y-%m-%d") - dates[i]).days
+                    ttm_years = max(days_to_exp / 365.0, 0.001)
+                    p = option_functions.call_price(df['underlying_bid'].iloc[i], strike, self.r, self.q, crypto_vol, ttm_years)
+                    prices.append(p)
+                
+                df['bid'] = prices
+                df['ask'] = prices
+                self.data_set = df
+            
             else:
                 while new_set is None:
                     dates = self.r_df['Date']
@@ -125,40 +171,30 @@ class Env():
         return self.__concat_state()
 
     def step(self, delta):
-        # Step from T0 to T1
         def reward_func(pnl):
-            # Reward scaled for clarity and small positive added
             pnl *= 100
             reward = 0.03 + pnl - self.kappa * (abs(pnl)**self.reward_exponent)
             return reward * 10
         
-        infos = {'T':self.option['T'],
-                'S/K':self.option['S/K']}
-        
+        infos = {'T':self.option['T'], 'S/K':self.option['S/K']}
         infos['Date'] = self.cur_date
         infos['DateStep'] = self.t % self.D
         
         b_delta = self.get_bs_delta()
         
-        #Linear transaction cost based on current (T0) face value and change in position
         t_cost = -abs(-delta - self.stockOwned) * self.S[self.t] * self.transaction_cost
         b_t_cost =  -abs(-b_delta - self.b_stockOwned) * self.S[self.t] * self.transaction_cost
         
         opt_old_price = self.option['P']
-        
         self.t += 1
-        
         self.__update_option()
-        
         done = self.t >= self.steps
 
         opt_new_price = self.option['P']
 
-        # PnL effect of underlying position
         pnl = -delta * (self.S[self.t] - self.S[self.t - 1])
         b_pnl = -b_delta * (self.S[self.t] - self.S[self.t - 1])
         
-        # PnL effect of option price change and transaction cost
         pnl += (opt_new_price - opt_old_price) + t_cost
         b_pnl += (opt_new_price - opt_old_price) + b_t_cost        
         
