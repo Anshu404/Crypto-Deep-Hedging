@@ -48,7 +48,8 @@ class Env():
         return norm.cdf(d1)
 
     def __concat_state(self):
-        return np.array([self.option['S/K'], self.option['T']/30, self.stockOwned, self.v])
+        # 5TH INPUT: Black-Scholes ka formula seedha AI ke dimaag mein feed kar rahe hain
+        return np.array([self.option['S/K'], self.option['T']/30, self.stockOwned, self.v, self.get_bs_delta()])
     
     def __update_option(self):
         row = self.data_set.loc[self.t, :]
