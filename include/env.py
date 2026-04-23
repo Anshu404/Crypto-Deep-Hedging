@@ -237,7 +237,6 @@
 #         infos['v'] = self.v
         
 #         return self.__concat_state(), reward, done, infos
-
 from include.option_functions import calc_impl_volatility
 import include.option_functions as option_functions
 import numpy as np
@@ -254,10 +253,15 @@ class Env():
         sim_type = 'GBM' if s['process'] == 'Crypto' else s['process']
         self.sim = simulation.Simulator(sim_type, periods_in_day = s['D'])
         
-        # Env Params
+        # ==========================================
+        # UPGRADE 1: THE KAPPA OVERDRIVE (RISK MANAGER FIX)
+        # ==========================================
         self.transaction_cost = s['transaction_cost']
-        self.kappa = s['kappa']
-        self.reward_exponent = s['reward_exponent']
+        # Force the AI to fear risk by multiplying penalty by 5
+        self.kappa = s['kappa'] * 5.0 
+        # Strictly set to 2.0 so penalty is based on Variance (PnL squared)
+        self.reward_exponent = 2.0 
+        
         self.SIGMA = s['SIGMA']
         self.process = s['process']
         self.q = s['q']
@@ -287,8 +291,7 @@ class Env():
         return norm.cdf(d1)
 
     def __concat_state(self):
-        # PURE 4-STATE: Moneyness, Time, Inventory, Implied Volatility
-        # NO BS DELTA CHEAT CODE!
+        # PURE 4-STATE
         return np.array([self.option['S/K'], self.option['T']/30, self.stockOwned, self.v])
 
     def __update_option(self):
@@ -314,13 +317,11 @@ class Env():
         ttm = (datetime.strptime(self.expiry, '%Y-%m-%d') - \
                datetime.strptime(self.cur_date, '%Y-%m-%d')).days - (1 - (self.D - self.t%self.D) / self.D)
 
-        # SAFETY NET: Time to maturity
         self.option['T'] = max(ttm, 0.001)
         self.option['S/K'] = spot / self.K
         
         iv = calc_impl_volatility(spot, self.K, self.r, self.q, self.option['T']/365, P)
         
-        # SAFETY NET: Volatility
         if iv:
             self.v = iv
         self.v = max(self.v, 0.01)
@@ -339,15 +340,12 @@ class Env():
                 self.data_set = self.data_keeper.next_train_set()
             elif self.process == 'Crypto':
                 if not self.testing:
-                    # ==========================================
                     # SIMULATOR (HESTON STOCHASTIC VOL)
-                    # ==========================================
                     spot = 100.0  
                     strike = 100.0 
                     self.r = 0.05
                     self.q = 0.0
                     
-                    # Crypto-like Volatility params
                     v0 = 0.60 ** 2      
                     kappa_h = 2.0       
                     theta_h = 0.60 ** 2 
@@ -383,7 +381,6 @@ class Env():
                     self.data_set = df
 
                 else:
-                    # TESTING BLOCK: Uses Real Data for out-of-sample validation
                     real_opt = self.crypto_data.sample(1).iloc[0]
                     spot = real_opt['underlying_bid']
                     strike = real_opt['strike']
@@ -448,21 +445,36 @@ class Env():
         return self.__concat_state()
 
     def step(self, delta):
-        def reward_func(raw_pnl):
+        b_delta = self.get_bs_delta()
+        
+        # Calculate how much the position is changing (churn)
+        delta_change = abs(-delta - self.stockOwned)
+        b_delta_change = abs(-b_delta - self.b_stockOwned)
+        
+        # ==========================================
+        # UPGRADE 2: ACTION SMOOTHING (Stop Over-Trading)
+        # ==========================================
+        def reward_func(raw_pnl, d_change):
             scale_factor = self.S[0] / 1000.0 if self.S[0] > 0 else 1.0
             pnl = raw_pnl / scale_factor
             pnl *= 100
-            reward = 0.03 + pnl - self.kappa * (abs(pnl)**self.reward_exponent)
+            
+            # 1. Variance Penalty (The core of hedging)
+            risk_penalty = self.kappa * (abs(pnl) ** self.reward_exponent)
+            
+            # 2. Action Smoothing Penalty (Fine for aggressive jumps to save fees)
+            smoothness_penalty = 2.0 * (d_change ** 2)
+            
+            # The True Hedging Objective: Max PnL - Variance Risk - Churn
+            reward = pnl - risk_penalty - smoothness_penalty
             return reward * 10
             
         infos = {'T':self.option['T'], 'S/K':self.option['S/K']}
         infos['Date'] = self.cur_date
         infos['DateStep'] = self.t % self.D
-        b_delta = self.get_bs_delta()
         
-        # INSTITUTIONAL FIX: Standard transaction cost applied directly to asset delta shifts
-        t_cost = -abs(-delta - self.stockOwned) * self.S[self.t] * self.transaction_cost
-        b_t_cost = -abs(-b_delta - self.b_stockOwned) * self.S[self.t] * self.transaction_cost
+        t_cost = -delta_change * self.S[self.t] * self.transaction_cost
+        b_t_cost = -b_delta_change * self.S[self.t] * self.transaction_cost
 
         opt_old_price = self.option['P']
         self.t += 1
@@ -480,8 +492,9 @@ class Env():
         self.stockOwned = -delta
         self.b_stockOwned = -b_delta
 
-        reward = reward_func(pnl)
-        b_reward = reward_func(b_pnl)
+        # Pass the delta change to the reward function
+        reward = reward_func(pnl, delta_change)
+        b_reward = reward_func(b_pnl, b_delta_change)
         
         infos['B Reward'] = b_reward
         infos['A Reward'] = reward
