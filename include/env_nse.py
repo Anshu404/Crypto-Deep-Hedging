@@ -62,13 +62,21 @@ class Env():
 
     def __concat_state(self):
         # PURE 4-STATE: Moneyness, Time, Inventory, Implied Volatility
-        return np.array([self.option['S/K'], self.option['T']/30, self.stockOwned, self.v])
+        # FIX: Force everything to be a pure Python float to prevent ragged arrays
+        sk = float(np.squeeze(self.option['S/K']))
+        t_30 = float(np.squeeze(self.option['T'] / 30.0))
+        inventory = float(np.squeeze(self.stockOwned))
+        vol = float(np.squeeze(self.v))
+        
+        return np.array([sk, t_30, inventory, vol], dtype=np.float32)
+    
 
     def __update_option(self):
         row = self.data_set.loc[self.t, :]
 
-        spot = row['underlying_bid']
-        P = 0.5 * (row['bid'] + row['ask'])
+        # FIX: Ensure these are scalar values, not Pandas Series
+        spot = float(np.squeeze(row['underlying_bid']))
+        P = float(np.squeeze(0.5 * (row['bid'] + row['ask'])))
         self.expiry = row['expiration'][0:10]
         self.K = float(row['strike'])
         self.S[self.t] = spot
