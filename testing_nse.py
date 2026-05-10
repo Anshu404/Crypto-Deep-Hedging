@@ -5,7 +5,7 @@ import argparse
 from include.settings import getSettings, setSettings
 
 # ==========================================
-# NSE UPGRADE: Load the Indian Equity Environment!
+# STRICT ISOLATION: Load the Indian Equity Environment!
 # ==========================================
 from include.env_nse import Env
 
@@ -156,8 +156,8 @@ if __name__ == '__main__':
         test_load(args['model'])
         result_eval(args['model'])
     elif args['validate']:
-        print(f'Validating model {args["model"]}')
+        print(f'Validating model {args["model"]} in NSE Mode')
         read_validation_files(args['model'])
     elif args['results']:
-        print(f'Result eval model {args["model"]}')
+        print(f'Result eval model {args["model"]} in NSE Mode')
         result_eval(args['model'])

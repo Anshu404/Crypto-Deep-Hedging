@@ -4,10 +4,10 @@ from os import path
 import argparse
 
 # ==========================================
-# NSE UPGRADE: Load the Indian Equity Environment
+# STRICT ISOLATION: Load the Indian Equity Environment & Testing
 # ==========================================
 from include.env_nse import Env
-from testing import test_run
+from testing_nse import test_run  # <-- Changed to testing_nse to keep pipeline pure
 
 from include.actor_critic import ActorCritic
 from include.utility import StatePrepare, get_model_number, maybe_make_dirs

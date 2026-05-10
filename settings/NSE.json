@@ -1,7 +1,7 @@
 {
     "process": "NSE",
     "transaction_cost": 0.001,
-    "kappa": 100,
+    "kappa": 225,
     "reward_exponent": 2.0,
     "n_steps": 30,
     "D": 1,
